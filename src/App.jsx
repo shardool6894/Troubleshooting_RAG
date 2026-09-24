@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { readPdf, chunkPages, buildIndex, search } from "./rag.js";
-import { askClaude } from "./claude.js";
+import { askGroq, hasGroqKey } from "./groq.js";
 import SourceCard from "./components/SourceCard.jsx";
 
-const EXAMPLES = ["Machine won't start", "Grinding noise", "Overheating", "Oil leak"];
+const EXAMPLES = ["Machine won't start", "Wire slipping", "Cooling", "Error H44"];
 const DANGER = /warning|danger|caution|lockout|high voltage|isolate/i;
 
 export default function App() {
@@ -11,10 +11,24 @@ export default function App() {
   const [question, setQuestion] = useState("");
   const [hits, setHits] = useState(null);
   const [answer, setAnswer] = useState("");
-  const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState("");
+
+  function loadPages(name, pages) {
+    const chunks = chunkPages(pages);
+    setManual({ name, pages, info: `${pages.length} pages · ${chunks.length} sections`, chunks, index: buildIndex(chunks) });
+  }
+
+  // If public/manual.json exists (deployed site), load it instantly
+  useEffect(() => {
+    fetch("/manual.json")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((pages) => {
+        if (Array.isArray(pages) && pages.length && pages[0].text) loadPages("Preloaded manual", pages);
+      })
+      .catch(() => {});
+  }, []);
 
   async function onFile(e) {
     const file = e.target.files[0];
@@ -23,13 +37,7 @@ export default function App() {
     try {
       const pages = await readPdf(file, setProgress);
       if (!pages.length) throw new Error("No text could be read from this PDF.");
-      const chunks = chunkPages(pages);
-      setManual({
-        name: file.name,
-        info: `${pages.length} pages · ${chunks.length} sections`,
-        chunks,
-        index: buildIndex(chunks),
-      });
+      loadPages(file.name, pages);
     } catch (err) {
       setError(err.message);
     }
@@ -43,9 +51,9 @@ export default function App() {
     setQuestion(q); setError(""); setAnswer("");
     const found = search(q, manual.chunks, manual.index);
     setHits(found);
-    if (apiKey && found.length) {
+    if (hasGroqKey && found.length) {
       setBusy(true);
-      try { setAnswer(await askClaude(apiKey, q, found)); }
+      try { setAnswer(await askGroq(q, found)); }
       catch (err) { setError("AI answer failed: " + err.message); }
       setBusy(false);
     }
@@ -59,7 +67,7 @@ export default function App() {
   return (
     <div className="wrap">
       <div className="hero">
-        <h1>🔧 Workshop Troubleshooter</h1>
+        <h1>🔧 YANTRA </h1>
         <p>Describe the fault. Get the fix straight from your machine manual.</p>
       </div>
 
@@ -73,8 +81,6 @@ export default function App() {
             {manual ? `✅ ${manual.name} · ${manual.info}` : "Step 1: upload your machine manual"}
           </span>
         </div>
-        <div className="label">CLAUDE API KEY (OPTIONAL, FOR WRITTEN STEP-BY-STEP ANSWERS)</div>
-        <input type="password" placeholder="sk-ant-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
       </div>
 
       <div className="label">QUICK PROBLEMS</div>
@@ -116,7 +122,7 @@ export default function App() {
           <h3>📄 From the manual</h3>
           {!hits.length && <div className="card muted">No matching section found. Try different words, e.g. the part name or symptom.</div>}
           {hits.map((h, i) => <SourceCard key={i} hit={h} />)}
-          {!apiKey && <p className="muted">Add a Claude API key above to also get a written step-by-step answer.</p>}
+          {!hasGroqKey && <p className="muted">AI answers are off: no Groq API key is configured (see README).</p>}
         </>
       )}
     </div>
