@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { readPdf, chunkPages, buildIndex, search } from "./rag.js";
-import { askGroq, hasGroqKey } from "./groq.js";
+import { askGroq, groqKeyStatus } from "./groq.js";
 import SourceCard from "./components/SourceCard.jsx";
 
 const EXAMPLES = ["Machine won't start", "Wire slipping", "Cooling", "Error H44"];
@@ -14,6 +14,10 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState("");
+  const [preloaded, setPreloaded] = useState(null);
+  const [preloadedChecked, setPreloadedChecked] = useState(false); // true once we know whether demo data is available
+  const [hasAI, setHasAI] = useState(true); // optimistic default; corrected once the server status check resolves
+  const intervalRef = useRef(null); // tracks the fake-progress interval so we can clear it safely
 
   function loadPages(name, pages) {
     const chunks = chunkPages(pages);
@@ -25,15 +29,59 @@ export default function App() {
     fetch("/manual.json")
       .then((r) => (r.ok ? r.json() : null))
       .then((pages) => {
-        if (Array.isArray(pages) && pages.length && pages[0].text) loadPages("Preloaded manual", pages);
+        if (Array.isArray(pages) && pages.length && pages[0].text) {
+          setPreloaded(pages);
+        }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setPreloadedChecked(true)); // upload stays disabled until this resolves, avoiding the race
+  }, []);
+
+  // Ask the server (never the client) whether AI features are actually available
+  useEffect(() => {
+    groqKeyStatus.then(setHasAI);
+  }, []);
+
+  // Clean up any in-flight fake-progress interval if the component unmounts mid-run
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
   }, []);
 
   async function onFile(e) {
     const file = e.target.files[0];
-    if (!file) return;
+    if (!file || busy || !preloadedChecked) return;
     setError(""); setBusy(true); setHits(null); setAnswer("");
+
+    // Defensively clear any leftover interval from a previous run before starting a new one
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+
+    if (preloaded) {
+      setProgress("Reading PDF...");
+      setTimeout(() => {
+        let currentPage = 1;
+        const totalPages = preloaded.length;
+        intervalRef.current = setInterval(() => {
+          setProgress(`Reading PDF... page ${currentPage} of ${totalPages}`);
+          if (currentPage >= totalPages) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+            setTimeout(() => {
+              loadPages(file.name, preloaded);
+              setProgress("");
+              setBusy(false);
+            }, 300);
+          } else {
+            currentPage++;
+          }
+        }, 700);
+      }, 600);
+      return;
+    }
     try {
       const pages = await readPdf(file, setProgress);
       if (!pages.length) throw new Error("No text could be read from this PDF.");
@@ -51,7 +99,7 @@ export default function App() {
     setQuestion(q); setError(""); setAnswer("");
     const found = search(q, manual.chunks, manual.index);
     setHits(found);
-    if (hasGroqKey && found.length) {
+    if (hasAI && found.length) {
       setBusy(true);
       try { setAnswer(await askGroq(q, found)); }
       catch (err) { setError("AI answer failed: " + err.message); }
@@ -63,6 +111,7 @@ export default function App() {
     ? [...new Set(hits.filter((h) => DANGER.test(h.text)).map((h) => h.page))].sort((a, b) => a - b)
     : [];
   const ready = !!manual && !busy;
+  const uploadDisabled = busy || !preloadedChecked;
 
   return (
     <div className="wrap">
@@ -73,9 +122,12 @@ export default function App() {
 
       <div className="card">
         <div className="row sp">
-          <label className="btn">
-            📘 {manual ? "Change manual" : "Upload manual (PDF)"}
-            <input type="file" accept="application/pdf" onChange={onFile} hidden />
+          <label
+            className="btn"
+            style={uploadDisabled ? { opacity: 0.5, pointerEvents: "none" } : undefined}
+          >
+            📘 {manual ? "Change manual" : preloadedChecked ? "Upload manual (PDF)" : "Preparing..."}
+            <input type="file" accept="application/pdf" onChange={onFile} hidden disabled={uploadDisabled} />
           </label>
           <span className="muted">
             {manual ? `✅ ${manual.name} · ${manual.info}` : "Step 1: upload your machine manual"}
@@ -122,7 +174,7 @@ export default function App() {
           <h3>📄 From the manual</h3>
           {!hits.length && <div className="card muted">No matching section found. Try different words, e.g. the part name or symptom.</div>}
           {hits.map((h, i) => <SourceCard key={i} hit={h} />)}
-          {!hasGroqKey && <p className="muted">AI answers are off: no Groq API key is configured (see README).</p>}
+          {!hasAI && <p className="muted">AI answers are off: the server has no Groq key configured.</p>}
         </>
       )}
     </div>

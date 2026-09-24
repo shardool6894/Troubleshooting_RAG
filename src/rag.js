@@ -2,7 +2,7 @@
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
 import { createWorker } from "tesseract.js";
-import { groqChat, hasGroqKey, VISION_MODEL } from "./groq.js";
+import { groqChat, groqKeyStatus, VISION_MODEL } from "./groq.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -116,8 +116,8 @@ async function browserOcr(pdf, pages, texts, onProgress) {
   await Promise.all(Array.from({ length: nWorkers }, run));
 }
 
-// 1. Read every page as text. Text pages are instant; scanned pages use AI OCR (if a key
-//    is given) or the built-in OCR.
+// 1. Read every page as text. Text pages are instant; scanned pages use AI OCR (if the
+//    server has a key configured) or the built-in OCR.
 export async function readPdf(file, onProgress = () => {}) {
   const bytes = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({
@@ -135,7 +135,7 @@ export async function readPdf(file, onProgress = () => {}) {
     onProgress(`Reading page ${i} of ${pdf.numPages}...`);
   }
 
-  if (scanned.length && hasGroqKey) {
+  if (scanned.length && (await groqKeyStatus)) {
     try {
       scanned = await aiOcr(pdf, scanned, texts, onProgress);
     } catch (err) {
